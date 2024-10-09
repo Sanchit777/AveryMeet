@@ -37,7 +37,7 @@ genai_api_key = "AIzaSyBA9pugaBbwTh39NGqhhmrYAs8cfU0Uh5k"
 genai.configure(api_key=genai_api_key)
 model = genai.GenerativeModel('gemini-1.5-flash')
 aai.settings.api_key = "37b81fbd27f54a3a83c9e64dd1880ddc"
-AWS_BUCKET_NAME = "myawsbucketaverymeet"
+aws_bucket_name = "myawsbucketaverymeet"
 
 
 # AWS credentials
@@ -46,7 +46,7 @@ with open('serviceAccountKey.json', 'r') as f:
     credentials = json.load(f)
 
 # Now the AWS_BUCKET_NAME is available in credentials['aws_bucket_name']
-aws_bucket_name = credentials['aws_bucket_name']
+# aws_bucket_name = credentials['aws_bucket_name']
 
 # Initialize the S3 client
 s3 = boto3.client(
@@ -54,7 +54,6 @@ s3 = boto3.client(
     aws_access_key_id=credentials['aws_access_key_id'],
     aws_secret_access_key=credentials['aws_secret_access_key'],
     region_name=credentials['aws_region'],
-    aws_bucket_name = credentials['aws_bucket_name']
     
 )
 
@@ -141,9 +140,9 @@ def verify_token():
 # Function to upload file to AWS S3
 def upload_to_s3(file_path, file_name):
     try:
-        s3.upload_file(file_path, AWS_BUCKET_NAME, file_name)
-        logger.info(f"File {file_name} uploaded successfully to S3 bucket {AWS_BUCKET_NAME}.")
-        return f"s3://{AWS_BUCKET_NAME}/{file_name}"
+        s3.upload_file(file_path, aws_bucket_name, file_name)
+        logger.info(f"File {file_name} uploaded successfully to S3 bucket {aws_bucket_name}.")
+        return f"s3://{aws_bucket_name}/{file_name}"
     except NoCredentialsError:
         logger.error("Credentials not available.")
         return None
