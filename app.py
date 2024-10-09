@@ -37,7 +37,7 @@ genai_api_key = "AIzaSyBA9pugaBbwTh39NGqhhmrYAs8cfU0Uh5k"
 genai.configure(api_key=genai_api_key)
 model = genai.GenerativeModel('gemini-1.5-flash')
 aai.settings.api_key = "37b81fbd27f54a3a83c9e64dd1880ddc"
-AWS_BUCKET_NAME = 'myawsbucketavermeet'
+"AWS_BUCKET_NAME" : "awsbucketavermeet"
 
 
 # AWS credentials
@@ -46,14 +46,16 @@ with open('serviceAccountKey.json', 'r') as f:
     credentials = json.load(f)
 
 # Now the AWS_BUCKET_NAME is available in credentials['aws_bucket_name']
-aws_bucket_name = credentials['aws_bucket_name']
+
 
 # Initialize the S3 client
 s3 = boto3.client(
     's3',
     aws_access_key_id=credentials['aws_access_key_id'],
     aws_secret_access_key=credentials['aws_secret_access_key'],
-    region_name=credentials['aws_region']
+    region_name=credentials['aws_region'],
+    aws_bucket_name = credentials['aws_bucket_name']
+    
 )
 
 # Use the aws_bucket_name variable in your code
