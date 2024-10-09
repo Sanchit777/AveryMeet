@@ -33,7 +33,7 @@ API_HEADERS = {
     "Content-Type": "application/json",
     "x-spoke-api-key": '9f82706f97e3a9af0384e61fff1a7b4f1babb37861c13a9507a3bbb6970de69b',
 }
-genai_api_key = "AIzaSyBA9pugaBbwTh39NGqhhmrYAs8cfU0Uh5k"
+genai_api_key = "AIzaSyBD7lTNbFWXHJDjdWQYSwa71D9DFgLsY-U"
 genai.configure(api_key=genai_api_key)
 model = genai.GenerativeModel('gemini-1.5-flash')
 aai.settings.api_key = "37b81fbd27f54a3a83c9e64dd1880ddc"
