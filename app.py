@@ -10,10 +10,10 @@ import assemblyai as aai
 import google.generativeai as genai
 from collections import defaultdict
 from datetime import datetime
-import dropbox
+import boto3
+from botocore.exceptions import NoCredentialsError
 import tempfile 
 import json
-
 app = Flask(__name__)
 
 CORS(app)
@@ -37,28 +37,30 @@ genai_api_key = "AIzaSyBA9pugaBbwTh39NGqhhmrYAs8cfU0Uh5k"
 genai.configure(api_key=genai_api_key)
 model = genai.GenerativeModel('gemini-1.5-flash')
 aai.settings.api_key = "37b81fbd27f54a3a83c9e64dd1880ddc"
+AWS_BUCKET_NAME = 'myawsbucketavermeet'
 
-# Initialize Dropbox client with your API key
-with open('serviceAccountKey.json', 'r') as json_file:
-    service_account_data = json.load(json_file)
 
-# Extract the Dropbox Access Token
-DROPBOX_ACCESS_TOKEN = service_account_data["DROPBOX_ACCESS_TOKEN"]
+# AWS credentials
+# Load the service account key
+with open('serviceAccountKey.json', 'r') as f:
+    credentials = json.load(f)
 
-# Initialize Dropbox object
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+# Now the AWS_BUCKET_NAME is available in credentials['aws_bucket_name']
+aws_bucket_name = credentials['aws_bucket_name']
 
-# Function to upload file to Dropbox
-def upload_to_dropbox(file, file_name):
-    print(f"Uploading {file_name} to Dropbox...")
-    try:
-        with open(file, 'rb') as f:
-            dbx.files_upload(f.read(), f"/{file_name}")
-            print(f"File {file_name} uploaded successfully.")
-        return f"/{file_name}"
-    except Exception as e:
-        print(f"Failed to upload {file_name} to Dropbox: {str(e)}")
-        return None
+# Initialize the S3 client
+s3 = boto3.client(
+    's3',
+    aws_access_key_id=credentials['aws_access_key_id'],
+    aws_secret_access_key=credentials['aws_secret_access_key'],
+    region_name=credentials['aws_region']
+)
+
+# Use the aws_bucket_name variable in your code
+response = s3.list_objects_v2(Bucket=aws_bucket_name)
+for obj in response.get('Contents', []):
+    print(obj['Key'])
+
 
 # @app.route('/signup', methods=['POST'])
 # def signup():
@@ -133,7 +135,20 @@ def verify_token():
     except Exception as e:
         # Return an error response if verification fails
         return jsonify({"message": "Invalid or expired token", "error": str(e)}), 401
-    
+
+# Function to upload file to AWS S3
+def upload_to_s3(file_path, file_name):
+    try:
+        s3.upload_file(file_path, AWS_BUCKET_NAME, file_name)
+        logger.info(f"File {file_name} uploaded successfully to S3 bucket {AWS_BUCKET_NAME}.")
+        return f"s3://{AWS_BUCKET_NAME}/{file_name}"
+    except NoCredentialsError:
+        logger.error("Credentials not available.")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to upload {file_name} to S3: {str(e)}")
+        return None
+
 # Function to generate prompt based on the meeting type
 def generate_prompt(meeting_type, transcript):
     print(f"Generating prompt for meeting type: {meeting_type}")
@@ -222,11 +237,11 @@ def transcribe():
             file.save(temp_file_path)
             print(f"File saved temporarily to {temp_file_path}")
 
-        # Upload the file to Dropbox
-        dropbox_file_path = upload_to_dropbox(temp_file_path, file.filename)
+        # Upload the file to AWS S3
+        s3_file_path = upload_to_s3(temp_file_path, file.filename)
 
-        if dropbox_file_path is None:
-            return jsonify({"error": "Failed to upload file to Dropbox"}), 500
+        if s3_file_path is None:
+            return jsonify({"error": "Failed to upload file to S3"}), 500
 
         # Transcribe the audio file
         print("Transcribing the file...")
@@ -241,15 +256,15 @@ def transcribe():
         summary = summarize_transcript(transcription_response['transcription'], meeting_type)
         print(f"Summary generated: {summary}")
 
-        # Save transcription, summary, Dropbox file path, and timestamp to the user's uploads collection
+        # Save transcription, summary, S3 file path, and timestamp to the user's uploads collection
         db.collection('users').document(user_id).collection('uploads').add({
             'file_name': file.filename,
-            'dropbox_path': dropbox_file_path,
+            's3_path': s3_file_path,
             'transcription': transcription_response['transcription'],
             'summary': summary,
             'timestamp': firestore.SERVER_TIMESTAMP  # Store the current timestamp
         })
-       
+
         # Clean up by removing the temp file
         print(f"Removing temporary file {temp_file_path} after processing.")
         os.remove(temp_file_path)
@@ -603,6 +618,7 @@ def delete_upload():
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))  # Default to port 5000 for local testing
