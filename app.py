@@ -37,7 +37,7 @@ genai_api_key = "AIzaSyBA9pugaBbwTh39NGqhhmrYAs8cfU0Uh5k"
 genai.configure(api_key=genai_api_key)
 model = genai.GenerativeModel('gemini-1.5-flash')
 aai.settings.api_key = "37b81fbd27f54a3a83c9e64dd1880ddc"
-aws_bucket_name = "myawsbucketaverymeet"
+aws_bucket_name = "myawsbucketavermeet"
 
 
 # AWS credentials
