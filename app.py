@@ -54,6 +54,7 @@ s3 = boto3.client(
     aws_access_key_id=credentials['aws_access_key_id'],
     aws_secret_access_key=credentials['aws_secret_access_key'],
     region_name=credentials['aws_region'],
+    aws_bucket_name = credentials['aws_bucket_name']
     
 )
 
