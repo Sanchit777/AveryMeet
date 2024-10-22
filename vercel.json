@@ -1,6 +1,10 @@
 {
-    "buildCommand": "pip install -r requirements.txt",
-    "outputDirectory": ".",
-    "installCommand": "pip install -r requirements.txt"
+    "version": 2,
+    "builds": [
+      {
+        "src": "app.py",
+        "use": "@vercel/python"
+      }
+    ]
   }
   
