@@ -3,7 +3,7 @@ import os
 import time
 import firebase_admin
 from firebase_admin import credentials, firestore ,auth
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response 
 from flask_cors import CORS  
 import logging
 import assemblyai as aai
@@ -12,55 +12,67 @@ from collections import defaultdict
 from datetime import datetime
 import boto3
 from botocore.exceptions import NoCredentialsError
-import tempfile 
+import tempfile
+import threading
 import json
+from threading import Thread
+from dotenv import load_dotenv
+
+
 app = Flask(__name__)
 
 CORS(app)
-
+load_dotenv()
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Initialize Firebase Admin SDK
-cred = credentials.Certificate("serviceAccountKey.json")
+# Firebase credentials
+firebase_config = {
+    "type": os.getenv("FIREBASE_TYPE"),
+    "project_id": os.getenv("FIREBASE_PROJECT_ID"),
+    "private_key_id": os.getenv("FIREBASE_PRIVATE_KEY_ID"),
+    "private_key": os.getenv("FIREBASE_PRIVATE_KEY").replace("\\n", "\n"),
+    "client_email": os.getenv("FIREBASE_CLIENT_EMAIL"),
+    "client_id": os.getenv("FIREBASE_CLIENT_ID"),
+    "auth_uri": os.getenv("FIREBASE_AUTH_URI"),
+    "token_uri": os.getenv("FIREBASE_TOKEN_URI"),
+    "auth_provider_x509_cert_url": os.getenv("FIREBASE_AUTH_PROVIDER_CERT_URL"),
+    "client_x509_cert_url": os.getenv("FIREBASE_CLIENT_CERT_URL"),
+}
+cred = credentials.Certificate(firebase_config)
+
+# Initialize the Firebase app
 firebase_admin.initialize_app(cred)
+
+# Initialize Firestore client
 db = firestore.client()
 
 # Third-party API URL and headers
 API_URL = "https://api.meetingbaas.com/bots"
 API_HEADERS = {
     "Content-Type": "application/json",
-    "x-spoke-api-key": '9f82706f97e3a9af0384e61fff1a7b4f1babb37861c13a9507a3bbb6970de69b',
+    "x-spoke-api-key": os.getenv('SPOKE_API_KEY'),
 }
-genai_api_key = "AIzaSyBD7lTNbFWXHJDjdWQYSwa71D9DFgLsY-U"
+genai_api_key = os.getenv("GENAI_API_KEY")
 genai.configure(api_key=genai_api_key)
 model = genai.GenerativeModel('gemini-1.5-flash')
-aai.settings.api_key = "37b81fbd27f54a3a83c9e64dd1880ddc"
-aws_bucket_name = "myawsbucketavermeet"
-
+aai_api_key = os.getenv("ASSEMBLYAI_API_KEY")
+if aai_api_key:
+    aai.settings.api_key = aai_api_key
+else:
+    print("Error: AAI_API_KEY not found.")
 
 # AWS credentials
-# Load the service account key
-with open('serviceAccountKey.json', 'r') as f:
-    credentials = json.load(f)
-
-# Now the AWS_BUCKET_NAME is available in credentials['aws_bucket_name']
-# aws_bucket_name = credentials['aws_bucket_name']
+AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+AWS_BUCKET_NAME = os.getenv('AWS_BUCKET_NAME')
+AWS_REGION = os.getenv('AWS_REGION')
 
 # Initialize the S3 client
-s3 = boto3.client(
-    's3',
-    aws_access_key_id=credentials['aws_access_key_id'],
-    aws_secret_access_key=credentials['aws_secret_access_key'],
-    region_name=credentials['aws_region'],
-    
-)
-
-# Use the aws_bucket_name variable in your code
-response = s3.list_objects_v2(Bucket=aws_bucket_name)
-for obj in response.get('Contents', []):
-    print(obj['Key'])
+s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY_ID,
+                  aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+                  region_name=AWS_REGION)
 
 
 # @app.route('/signup', methods=['POST'])
@@ -140,9 +152,9 @@ def verify_token():
 # Function to upload file to AWS S3
 def upload_to_s3(file_path, file_name):
     try:
-        s3.upload_file(file_path, aws_bucket_name, file_name)
-        logger.info(f"File {file_name} uploaded successfully to S3 bucket {aws_bucket_name}.")
-        return f"s3://{aws_bucket_name}/{file_name}"
+        s3.upload_file(file_path, AWS_BUCKET_NAME, file_name)
+        logger.info(f"File {file_name} uploaded successfully to S3 bucket {AWS_BUCKET_NAME}.")
+        return f"s3://{AWS_BUCKET_NAME}/{file_name}"
     except NoCredentialsError:
         logger.error("Credentials not available.")
         return None
@@ -275,7 +287,11 @@ def transcribe():
     except Exception as e:
         print(f"An error occurred: {str(e)}")
         return jsonify({"error": f"An error occurred: {str(e)}"}), 500
-    
+
+# Store the event and bot status
+bot_status_event = {}
+bot_status_data = {}
+
 @app.route('/start-meeting-bot', methods=['POST'])
 def start_meeting_bot():
     data = request.json
@@ -296,35 +312,146 @@ def start_meeting_bot():
     }
 
     try:
+        # Make the initial request to start the bot
         response = requests.post(API_URL, json=config, headers=API_HEADERS)
         response_data = response.json()
 
         if response.status_code == 200:
             bot_id = response_data.get("bot_id")
-
             if bot_id:
-                # Save bot data under the user's document
                 user_ref = db.collection('users').document(user_id)
                 bot_ref = user_ref.collection('bots').document(bot_id)
                 bot_ref.set({
                     "bot_id": bot_id,
                     "meetingUrl": meeting_url,
-                    "timestamp": firestore.SERVER_TIMESTAMP,
+                    "timestamp": firestore.SERVER_TIMESTAMP
                 })
+                bot_status_event[bot_id] = threading.Event()
+                bot_status_data[bot_id] = {"status": None, "created_at": None}
 
-                return jsonify({"message": "Bot sent successfully", "bot_id": bot_id}), 200
+                # Create a Firestore collection for this bot
+                bot_collection_ref = db.collection('users').document(user_id).collection('bots').document(bot_id)
+
+                def generate_status_updates():
+                    yield f"data: {json.dumps({'bot_id': bot_id})}\n\n"
+                    while True:
+                        # Get the current status from bot_status_data
+                        current_status = bot_status_data[bot_id].get("status")
+                        timestamp = firestore.SERVER_TIMESTAMP  # Use server timestamp for Firebase
+
+                        # Prepare the status update
+                        if current_status in ["call_ended"]:
+                            status_message = "call ended"
+                            yield f"data: {json.dumps({'status': status_message})}\n\n"
+                            bot_collection_ref.set({
+                                "status": "call ended",
+                            }, merge=True)
+
+                            # Start a separate thread to check for event completion
+                            Thread(target=check_event_completion, args=(bot_id,user_id)).start()
+                            break
+                        elif current_status in ["failed"]:
+                            status_message = "failed"
+                            yield f"data: {json.dumps({'status': status_message})}\n\n"
+                            # Update Firestore
+                            bot_collection_ref.set({
+                                "status": "failed",
+                            }, merge=True)
+                            break
+
+                        elif current_status in ["in_call_recording"]:
+                            status_message = "in_call_recording"
+                            yield f"data: {json.dumps({'status': status_message})}\n\n"
+                            # Update Firestore
+                            bot_collection_ref.set({
+                                "status": "in_call_recording",
+                            }, merge=True)
+
+                        elif current_status in ["in_call_not_recording"]:
+                            status_message = "in_call_not_recording"
+                            yield f"data: {json.dumps({'status': status_message})}\n\n"
+                            # Update Firestore
+                            bot_collection_ref.set({
+                                "status": "in_call_not_recording",
+                            }, merge=True)
+
+                        elif current_status in ["in_waiting_room"]:
+                            status_message = "in_waiting_room"
+                            yield f"data: {json.dumps({'status': status_message})}\n\n"
+                            # Update Firestore
+                            bot_collection_ref.set({
+                                "status": "in_waiting_room",
+                            }, merge=True)
+
+                        elif current_status in ["joining_call"]:
+                            status_message = "joining_call"
+                            yield f"data: {json.dumps({'status': status_message})}\n\n"
+                            # Update Firestore
+                            bot_collection_ref.set({
+                                "status": "joining_call",
+                            }, merge=True)
+
+                        else:
+                            bot_collection_ref.set({
+                                "status": "waiting",
+                            }, merge=True)
+
+                        time.sleep(2)  # Delay before checking again
+
+                return Response(generate_status_updates(), mimetype='text/event-stream')
             else:
                 return jsonify({"error": "Bot ID not found in the response"}), 500
         else:
-            return jsonify({"error": f"Failed to send bot: {response_data}"}), response.status_code
+            return jsonify({"error": f"Failed to start bot: {response_data}"}), response.status_code
 
     except Exception as e:
         return jsonify({"error": f"An error occurred: {str(e)}"}), 500
 
+def check_event_completion(bot_id ,user_id):
+    # Wait for the event to complete and then update Firestore
+    bot_collection_ref = db.collection('users').document(user_id).collection('bots').document(bot_id)
+    while True:
+        current_status = bot_status_data[bot_id].get("status")
+        if current_status == "complete":
+            # Assume here that the event is complete right after the call ends
+            # Update Firestore with the completion status
+            bot_collection_ref.set({
+                "status": "complete",
+            }, merge=True)
+            break
+        time.sleep(2)
 
+@app.route('/remove-meeting-bot', methods=['DELETE'])
+def remove_meeting_bot():
+    data = request.json
+    bot_id = data.get('bot_id')  # Get bot_id from request body 
+
+    if not bot_id:
+        return jsonify({"error": "bot_id parameter is required"}), 400
+    
+
+    try:
+        
+        
+        url = f"{API_URL}/{bot_id}"
+        headers = {
+            "Content-Type": "application/json",
+            "x-spoke-api-key": API_HEADERS["x-spoke-api-key"]
+        }
+
+        response = requests.delete(url, headers=headers)
+        
+        if response.status_code == 200:
+            return jsonify({"message": "Bot removed successfully"}), 200
+        else:
+            return jsonify({"error": "Failed to remove the bot from third-party service", "details": response.text}), response.status_code
+
+    except Exception as e:
+        logger.error(f"Error while removing bot: {e}")
+        return jsonify({"error": "An error occurred while removing the bot", "details": str(e)}), 500
 
     
-@app.route('/meetings', methods=['GET'])
+@app.route('/meetings', methods=['POST'])
 def get_user_meetings():
     try:
         user_id = request.args.get('user_id')  # Get the user_id from the request
@@ -619,6 +746,73 @@ def delete_upload():
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@app.errorhandler(404)
+def not_found(error):
+    # Initialize variables to hold the extracted values
+    bot_id = None
+    event = None
+    status_code = None
+    created_at = None
+    
+    # Attempt to capture JSON payload from the request
+    request_data = request.get_json()
+    
+    # Check if request_data is not None and contains the expected keys
+    if request_data and 'event' in request_data:
+        event = request_data['event']
+        bot_id = request_data['data'].get('bot_id')
+
+        if event == 'bot.status_change':
+            status_code = request_data['data'].get('status', {}).get('code')
+            created_at = request_data['data'].get('status', {}).get('created_at')
+            
+            # If bot_id is tracked, update its status and trigger the event
+            if bot_id in bot_status_event:
+                bot_status_data[bot_id] = {
+                    "status": status_code,
+                    "created_at": created_at
+                }
+                app.logger.info(f"Received status update for bot {bot_id}: {status_code}")
+                
+                # Mark the event as complete if the status is 'call_ended' or 'failed'
+                if status_code in ['call_ended', 'failed']:
+                    bot_status_event[bot_id].set()
+
+        
+
+        elif event == 'failed':
+            # Handle failed event
+            error_message = request_data['data'].get('error')
+            app.logger.info(f"Bot {bot_id} failed: {error_message}")
+            if bot_id in bot_status_event:
+                bot_status_data[bot_id] = {
+                    "status": "failed",
+                    "created_at": created_at
+                }
+                bot_status_event[bot_id].set()
+
+        elif event == 'complete':
+            # Handle failed event
+            error_message = request_data['data'].get('status', {}).get('code')
+            created_at = request_data['data'].get('status', {}).get('created_at')
+            if bot_id in bot_status_event:
+                bot_status_data[bot_id] = {
+                    "status": "complete",
+                    "created_at": created_at
+                }
+                bot_status_event[bot_id].set()
+
+    # Log the extracted values
+    app.logger.info(f'404 Error: {error}, Event: {event}, Bot ID: {bot_id}, Status: {status_code}, Created At: {created_at}')
+    
+    return jsonify({
+        "event": event,
+        "bot_id": bot_id,
+        "status": status_code,
+        "created_at": created_at
+    }), 404
+
 
 
 if __name__ == '__main__':
