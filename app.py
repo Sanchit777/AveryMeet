@@ -305,7 +305,6 @@ def start_meeting_bot():
         "meeting_url": meeting_url,
         "bot_name": "AveryMeet AI Bot",
         "recording_mode": "speaker_view",
-        "bot_image": "https://media-exp1.licdn.com/dms/image/C510BAQFO9wB5bgkHXA/company-logo_200_200/0?e=2159024400&v=beta&t=R8f-gia_POtjTafDcfamQViVHjyy0GRJDGjLOyjCJ2w",
         "entry_message": "I am AveryMeets's AI Bot, I am here to record this exchange to facilitate note-taking. This process is 100% automated, secure and confidential, strictly respecting your privacy and European GDPR standards. If you prefer not to use the service, the bot can be removed from the meeting upon simple request.",
         "reserved": False,
         "speech_to_text": "Gladia",
