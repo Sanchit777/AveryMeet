@@ -754,17 +754,15 @@ def delete_upload():
         logger.error(f"An error occurred: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@app.errorhandler(404)
+@app.route('/webhook', methods=['POST'])
 def not_found(error):
     # Initialize variables to hold the extracted values
     bot_id = None
     event = None
     status_code = None
     created_at = None
-
     # Attempt to capture JSON payload from the request
     request_data = request.get_json()
-
     # Define helper functions inside the error handler
     def download_mp4(mp4_url, local_file_path):
         try:
@@ -775,18 +773,14 @@ def not_found(error):
             app.logger.info(f"Downloaded MP4 for bot {bot_id}: {local_file_path}")
         except Exception as e:
             app.logger.error(f"Error downloading MP4: {e}")
-
     def upload_mp4_to_s3(local_file_path, bot_id):
         try:
         # Upload the file to S3
             s3.upload_file(local_file_path, AWS_BUCKET_NAME, f"{bot_id}.mp4")
-        
         # Set the object to be public
             s3.put_object_acl(ACL='public-read', Bucket=AWS_BUCKET_NAME, Key=f"{bot_id}.mp4")
-        
         # Generate the public S3 URL
             s3_url = f"https://{AWS_BUCKET_NAME}.s3.amazonaws.com/{bot_id}.mp4"
-        
             app.logger.info(f"Uploaded MP4 to S3 for bot {bot_id}: {s3_url}")
             return s3_url
         except (NoCredentialsError, PartialCredentialsError) as e:
@@ -794,16 +788,13 @@ def not_found(error):
         except Exception as e:
             app.logger.error(f"Error uploading MP4 to S3: {e}")
         return None
-
     # Check if request_data is not None and contains the expected keys
     if request_data and 'event' in request_data:
         event = request_data['event']
         bot_id = request_data['data'].get('bot_id')
-
         if event == 'bot.status_change':
             status_code = request_data['data'].get('status', {}).get('code')
             created_at = request_data['data'].get('status', {}).get('created_at')
-
             # If bot_id is tracked, update its status and trigger the event
             if bot_id in bot_status_event:
                 bot_status_data[bot_id] = {
@@ -811,11 +802,9 @@ def not_found(error):
                     "created_at": created_at
                 }
                 app.logger.info(f"Received status update for bot {bot_id}: {status_code}")
-
                 # Mark the event as complete if the status is 'call_ended' or 'failed'
                 if status_code in ['call_ended', 'failed']:
                     bot_status_event[bot_id].set()
-
         elif event == 'failed':
             # Handle failed event
             error_message = request_data['data'].get('error')
@@ -826,63 +815,49 @@ def not_found(error):
                     "created_at": created_at
                 }
                 bot_status_event[bot_id].set()
-
         elif event == 'complete':
             # Handle complete event directly from request_data
             meeting_data = request_data['data']  # Use the data from the request
-
             app.logger.info(f"Meeting data for bot {bot_id}: {meeting_data}")
             # Query Firestore to find the user associated with the bot_id
             users_ref = db.collection('users')
-
             # Extract user IDs from matching documents
             user_uid = None
             while user_uid is None:
                 user_docs = users_ref.stream()
-
                 # Extract user IDs from matching documents
                 for user_doc in user_docs:
                     bots_ref = user_doc.reference.collection('bots')  # Reference to the bots subcollection
                     bot_doc = bots_ref.document(bot_id).get()  # Check if the bot exists
-
                     if bot_doc.exists:
                         user_uid = user_doc.id  # Store the found user ID
                         app.logger.info(f"User ID associated with bot {bot_id}: {user_uid}")
                         # Break out of the loop once a user ID is found
-
             # If user_uid is still None, log an error and wait before retrying
             if user_uid is None:
                 app.logger.error(f"No user found for bot ID: {bot_id}. Retrying...")
                 time.sleep(5)
-
             # At this point, user_uid has been found, proceed with fetching the bot document
             bot_doc_ref = db.collection('users').document(user_uid).collection('bots').document(bot_id)
             bot_doc = bot_doc_ref.get()
-
             if not bot_doc.exists:
                 app.logger.error("No such bot document!")
-                return 
-
+                return
             # Extract necessary data
             mp4_url = meeting_data['mp4']  # Correct way to get the mp4 URL
             attendees = meeting_data['speakers']  # Correct way to get the attendees/speakers
-
             # Download MP4 file locally
             local_file_path = f'/{bot_id}.mp4'  # Temporary local path
             download_mp4(mp4_url, local_file_path)
-
             # Upload to S3 and get the uploaded URL
             uploaded_mp4_url = upload_mp4_to_s3(local_file_path,bot_id)
-
             if uploaded_mp4_url is None:
                 app.logger.error("Failed to upload MP4 to S3.")
-                return 
-
+                return
             # Extract transcription and summary logic
             speaker_statements = extract_speaker_statements(meeting_data)
             merged_statements = merge_statements(speaker_statements)
             summary = summarize_transcript(merged_statements, model)
-
             # Prepare the meeting_summary object for Firestore
             meeting_summary_firebase = {
                 'attendees': attendees,
@@ -891,10 +866,8 @@ def not_found(error):
                 'mp4_url': uploaded_mp4_url,  # Store the S3 URL
                 'timestamp': firestore.SERVER_TIMESTAMP,
             }
-
             # Save to Firestore
             bot_doc_ref.collection('meeting_summary').add(meeting_summary_firebase)
-
             # Update bot status for the complete event
             if bot_id in bot_status_event:
                 bot_status_data[bot_id] = {
@@ -902,16 +875,14 @@ def not_found(error):
                     "created_at": meeting_data.get('created_at')
                 }
                 bot_status_event[bot_id].set()
-
     # Log the extracted values
     app.logger.info(f'404 Error: {error}, Event: {event}, Bot ID: {bot_id}, Status: {status_code}, Created At: {created_at}')
-
     return jsonify({
         "event": event,
         "bot_id": bot_id,
         "status": status_code,
         "created_at": created_at
-    }), 404
+    }),
 
 
 # Extract speaker statements from meeting data
