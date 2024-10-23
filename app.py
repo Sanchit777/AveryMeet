@@ -755,7 +755,7 @@ def delete_upload():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/webhook', methods=['POST'])
-def not_found(error):
+def not_found():
     # Initialize variables to hold the extracted values
     bot_id = None
     event = None
