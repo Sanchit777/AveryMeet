@@ -11,12 +11,13 @@ import google.generativeai as genai
 from collections import defaultdict
 from datetime import datetime
 import boto3
-from botocore.exceptions import NoCredentialsError
+from botocore.exceptions import NoCredentialsError,PartialCredentialsError
 import tempfile
 import threading
 import json
 from threading import Thread
 from dotenv import load_dotenv
+
 
 
 app = Flask(__name__)
@@ -39,6 +40,7 @@ firebase_config = {
     "token_uri": os.getenv("FIREBASE_TOKEN_URI"),
     "auth_provider_x509_cert_url": os.getenv("FIREBASE_AUTH_PROVIDER_CERT_URL"),
     "client_x509_cert_url": os.getenv("FIREBASE_CLIENT_CERT_URL"),
+    "storageBucket" : os.getenv("FIRBASE_STORAGE_BUCKET_URL")
 }
 cred = credentials.Certificate(firebase_config)
 
@@ -57,11 +59,13 @@ API_HEADERS = {
 genai_api_key = os.getenv("GENAI_API_KEY")
 genai.configure(api_key=genai_api_key)
 model = genai.GenerativeModel('gemini-1.5-flash')
+
 aai_api_key = os.getenv("ASSEMBLYAI_API_KEY")
 if aai_api_key:
     aai.settings.api_key = aai_api_key
 else:
     print("Error: AAI_API_KEY not found.")
+
 
 # AWS credentials
 AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
@@ -305,6 +309,7 @@ def start_meeting_bot():
         "meeting_url": meeting_url,
         "bot_name": "AveryMeet AI Bot",
         "recording_mode": "speaker_view",
+        "bot_image": "https://media-exp1.licdn.com/dms/image/C510BAQFO9wB5bgkHXA/company-logo_200_200/0?e=2159024400&v=beta&t=R8f-gia_POtjTafDcfamQViVHjyy0GRJDGjLOyjCJ2w",
         "entry_message": "I am AveryMeets's AI Bot, I am here to record this exchange to facilitate note-taking. This process is 100% automated, secure and confidential, strictly respecting your privacy and European GDPR standards. If you prefer not to use the service, the bot can be removed from the meeting upon simple request.",
         "reserved": False,
         "speech_to_text": "Gladia",
@@ -639,9 +644,11 @@ def get_meeting_data():
 # if __name__ == '__main__':
 #     app.run(host='192.168.29.46', port=5000, debug=True)
 
-@app.route('/last_meeting_summary', methods=['GET'])
+@app.route('/last_meeting_summary', methods=['POST'])
 def get_last_meeting_summary():
-    user_id = request.args.get('user_id')  # Get user_id to fetch the correct bots
+    data = request.get_json()  # Retrieve the JSON body
+    user_id = data.get('user_id')  # Extract user_id from the JSON body
+
     if not user_id:
         logger.error("user_id parameter is required")
         return jsonify({'error': 'user_id parameter is required'}), 400
@@ -674,10 +681,11 @@ def get_last_meeting_summary():
 
     if latest_meeting_summary:
         logger.info("Latest meeting summary found")
-        return jsonify({'meeting_summary' : latest_meeting_summary}), 200
+        return jsonify({'meeting_summary': latest_meeting_summary}), 200
     else:
         logger.warning("No meeting summaries found for the user")
         return jsonify({'error': 'No meeting summaries found for the user'}), 404
+
     
 
 @app.route('/uploads', methods=['GET'])
@@ -753,10 +761,40 @@ def not_found(error):
     event = None
     status_code = None
     created_at = None
-    
+
     # Attempt to capture JSON payload from the request
     request_data = request.get_json()
-    
+
+    # Define helper functions inside the error handler
+    def download_mp4(mp4_url, local_file_path):
+        try:
+            response = requests.get(mp4_url)
+            response.raise_for_status()
+            with open(local_file_path, 'wb') as file:
+                file.write(response.content)
+            app.logger.info(f"Downloaded MP4 for bot {bot_id}: {local_file_path}")
+        except Exception as e:
+            app.logger.error(f"Error downloading MP4: {e}")
+
+    def upload_mp4_to_s3(local_file_path, bot_id):
+        try:
+        # Upload the file to S3
+            s3.upload_file(local_file_path, AWS_BUCKET_NAME, f"{bot_id}.mp4")
+        
+        # Set the object to be public
+            s3.put_object_acl(ACL='public-read', Bucket=AWS_BUCKET_NAME, Key=f"{bot_id}.mp4")
+        
+        # Generate the public S3 URL
+            s3_url = f"https://{AWS_BUCKET_NAME}.s3.amazonaws.com/{bot_id}.mp4"
+        
+            app.logger.info(f"Uploaded MP4 to S3 for bot {bot_id}: {s3_url}")
+            return s3_url
+        except (NoCredentialsError, PartialCredentialsError) as e:
+            app.logger.error(f"Credentials error: {e}")
+        except Exception as e:
+            app.logger.error(f"Error uploading MP4 to S3: {e}")
+        return None
+
     # Check if request_data is not None and contains the expected keys
     if request_data and 'event' in request_data:
         event = request_data['event']
@@ -765,7 +803,7 @@ def not_found(error):
         if event == 'bot.status_change':
             status_code = request_data['data'].get('status', {}).get('code')
             created_at = request_data['data'].get('status', {}).get('created_at')
-            
+
             # If bot_id is tracked, update its status and trigger the event
             if bot_id in bot_status_event:
                 bot_status_data[bot_id] = {
@@ -773,12 +811,10 @@ def not_found(error):
                     "created_at": created_at
                 }
                 app.logger.info(f"Received status update for bot {bot_id}: {status_code}")
-                
+
                 # Mark the event as complete if the status is 'call_ended' or 'failed'
                 if status_code in ['call_ended', 'failed']:
                     bot_status_event[bot_id].set()
-
-        
 
         elif event == 'failed':
             # Handle failed event
@@ -792,19 +828,84 @@ def not_found(error):
                 bot_status_event[bot_id].set()
 
         elif event == 'complete':
-            # Handle failed event
-            error_message = request_data['data'].get('status', {}).get('code')
-            created_at = request_data['data'].get('status', {}).get('created_at')
+            # Handle complete event directly from request_data
+            meeting_data = request_data['data']  # Use the data from the request
+
+            app.logger.info(f"Meeting data for bot {bot_id}: {meeting_data}")
+            # Query Firestore to find the user associated with the bot_id
+            users_ref = db.collection('users')
+
+            # Extract user IDs from matching documents
+            user_uid = None
+            while user_uid is None:
+                user_docs = users_ref.stream()
+
+                # Extract user IDs from matching documents
+                for user_doc in user_docs:
+                    bots_ref = user_doc.reference.collection('bots')  # Reference to the bots subcollection
+                    bot_doc = bots_ref.document(bot_id).get()  # Check if the bot exists
+
+                    if bot_doc.exists:
+                        user_uid = user_doc.id  # Store the found user ID
+                        app.logger.info(f"User ID associated with bot {bot_id}: {user_uid}")
+                        # Break out of the loop once a user ID is found
+
+            # If user_uid is still None, log an error and wait before retrying
+            if user_uid is None:
+                app.logger.error(f"No user found for bot ID: {bot_id}. Retrying...")
+                time.sleep(5)
+
+            # At this point, user_uid has been found, proceed with fetching the bot document
+            bot_doc_ref = db.collection('users').document(user_uid).collection('bots').document(bot_id)
+            bot_doc = bot_doc_ref.get()
+
+            if not bot_doc.exists:
+                app.logger.error("No such bot document!")
+                return 
+
+            # Extract necessary data
+            mp4_url = meeting_data['mp4']  # Correct way to get the mp4 URL
+            attendees = meeting_data['speakers']  # Correct way to get the attendees/speakers
+
+            # Download MP4 file locally
+            local_file_path = f'/{bot_id}.mp4'  # Temporary local path
+            download_mp4(mp4_url, local_file_path)
+
+            # Upload to S3 and get the uploaded URL
+            uploaded_mp4_url = upload_mp4_to_s3(local_file_path,bot_id)
+
+            if uploaded_mp4_url is None:
+                app.logger.error("Failed to upload MP4 to S3.")
+                return 
+
+            # Extract transcription and summary logic
+            speaker_statements = extract_speaker_statements(meeting_data)
+            merged_statements = merge_statements(speaker_statements)
+            summary = summarize_transcript(merged_statements, model)
+
+            # Prepare the meeting_summary object for Firestore
+            meeting_summary_firebase = {
+                'attendees': attendees,
+                'transcription': merged_statements,
+                'summary': summary,
+                'mp4_url': uploaded_mp4_url,  # Store the S3 URL
+                'timestamp': firestore.SERVER_TIMESTAMP,
+            }
+
+            # Save to Firestore
+            bot_doc_ref.collection('meeting_summary').add(meeting_summary_firebase)
+
+            # Update bot status for the complete event
             if bot_id in bot_status_event:
                 bot_status_data[bot_id] = {
                     "status": "complete",
-                    "created_at": created_at
+                    "created_at": meeting_data.get('created_at')
                 }
                 bot_status_event[bot_id].set()
 
     # Log the extracted values
     app.logger.info(f'404 Error: {error}, Event: {event}, Bot ID: {bot_id}, Status: {status_code}, Created At: {created_at}')
-    
+
     return jsonify({
         "event": event,
         "bot_id": bot_id,
@@ -813,6 +914,79 @@ def not_found(error):
     }), 404
 
 
+# Extract speaker statements from meeting data
+def extract_speaker_statements(meeting_data):
+    # Assuming the correct key is 'transcript' based on your API response, not 'editors'
+    transcripts = meeting_data.get('transcript', [])
+    speaker_transcripts = defaultdict(lambda: defaultdict(list))
+
+    for transcript in transcripts:
+        speaker = transcript.get('speaker')
+        words = transcript.get('words', [])
+
+        if not speaker or not words:
+            continue  # Skip if no speaker or words
+
+        start_time = words[0].get('start', 0.0)  # Adjust to match your API response (start, end, word)
+        text = ' '.join(word.get('word') for word in words if word.get('word')).strip()  # Use 'word' not 'text'
+
+        if text:
+            speaker_transcripts[speaker][start_time].append(text)
+
+    speaker_statements = []
+
+    # Organizing speaker statements by time
+    for speaker, timestamps in speaker_transcripts.items():
+        for start_time, texts in sorted(timestamps.items()):
+            full_statement = ' '.join(texts).strip()
+            speaker_statements.append(f"from {start_time:.2f}s {speaker} : {full_statement}")
+
+    return speaker_statements
+
+
+# Merge statements of each speaker with similar timestamps
+def merge_statements(statements):
+    merged_statements = []
+    speaker_lines = defaultdict(list)
+
+    for statement in statements:
+        parts = statement.split(' : ', 1)
+        if len(parts) < 2:
+            continue  # Skip malformed statements
+
+        timestamp_and_speaker = parts[0].split(' ', 2)
+        if len(timestamp_and_speaker) < 3:
+            continue  # Skip malformed timestamp and speaker part
+
+        timestamp = timestamp_and_speaker[1]  # Extract timestamp
+        speaker = timestamp_and_speaker[2]    # Extract speaker name
+        text = parts[1].strip()               # The actual text spoken
+
+        speaker_lines[(timestamp, speaker)].append(text)
+
+    for (timestamp, speaker), texts in sorted(speaker_lines.items()):
+        full_statement = ' '.join(texts).strip()
+        merged_statements.append(f"{speaker} at {timestamp}s :- {full_statement}")
+
+    return merged_statements
+
+
+# Summarize the transcript using LLM
+def summarize_transcript(statements, model):
+    try:
+        transcript = "\n".join(statements)
+        prompt = f"Summarize the following meeting transcript:\n{transcript}"
+
+        # Assuming `model` is a function or object for generating content (like GPT-3)
+        response = model.generate_content(prompt)  # Assuming this returns an object with `text` attribute
+        summary = response.text.strip() if hasattr(response, 'text') else "No summary generated."
+
+        return summary
+
+    except AttributeError as e:
+        return f"Error: {str(e)}"
+    except Exception as e:
+        return f"An unexpected error occurred: {str(e)}"
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))  # Default to port 5000 for local testing
