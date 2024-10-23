@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 
 app = Flask(__name__)
 
-CORS(app)
+CORS(app, origins=["https://meet.google.com"])
 load_dotenv()
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
